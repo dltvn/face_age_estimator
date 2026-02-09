@@ -10,4 +10,5 @@ wheels/
 .venv
 
 # Data directory contents
-data/*
+data/utk_face
+data/utk_face_invalid_backup
