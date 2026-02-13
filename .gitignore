@@ -12,3 +12,4 @@ wheels/
 # Data directory contents
 data/utk_face
 data/utk_face_invalid_backup
+data/utk_face.zip
