@@ -31,6 +31,7 @@ class DetectedFace:
     landmarks:
         The 5 facial keypoints returned by MTCNN.
     """
+
     box: np.ndarray
     prob: float
     landmarks: Landmarks5
@@ -73,9 +74,9 @@ def _template_5pts(output_size: tuple[int, int]) -> np.ndarray:
 #
 # It does NOT change pose (no 3D correction).
 # -------------------------------------------------------------
-def estimate_affine_from_5pts(src_landmarks: Landmarks5,
-                              output_size: tuple[int, int]) -> np.ndarray:
-
+def estimate_affine_from_5pts(
+    src_landmarks: Landmarks5, output_size: tuple[int, int]
+) -> np.ndarray:
     if src_landmarks.shape != (5, 2):
         raise ValueError(f"Expected (5,2) landmarks, got {src_landmarks.shape}")
 
@@ -121,10 +122,9 @@ def _mean_border_value(image_bgr: np.ndarray) -> tuple[int, int, int]:
 #
 # The result is always a fixed-size image (e.g., 224x224).
 # -------------------------------------------------------------
-def warp_face(image_bgr: np.ndarray,
-              M_2x3: np.ndarray,
-              output_size: tuple[int, int]) -> np.ndarray:
-
+def warp_face(
+    image_bgr: np.ndarray, M_2x3: np.ndarray, output_size: tuple[int, int]
+) -> np.ndarray:
     w, h = output_size
     border_value = _mean_border_value(image_bgr)
 
@@ -149,10 +149,9 @@ def warp_face(image_bgr: np.ndarray,
 # Because without margin, parts of the face can get
 # cut off after rotation.
 # -------------------------------------------------------------
-def _square_crop_with_margin(image_bgr: np.ndarray,
-                             box_xyxy: np.ndarray,
-                             margin: float):
-
+def _square_crop_with_margin(
+    image_bgr: np.ndarray, box_xyxy: np.ndarray, margin: float
+):
     h, w = image_bgr.shape[:2]
     box = _clip_xyxy(box_xyxy, width=w, height=h)
     x1, y1, x2, y2 = box
@@ -252,20 +251,30 @@ class FaceDetectorMTCNN:
         pick: str = "largest",
         margin: float = 0.50,
     ) -> dict[str, Any]:
+        if image_bgr.ndim != 3 or image_bgr.shape[2] != 3:
+            raise ValueError(
+                f"Expected a 3-channel BGR image, got shape {image_bgr.shape}"
+            )
 
         faces = self.detect(image_bgr)
         if not faces:
             return {"faces": [], "selected": None}
 
-        faces_f = [f for f in faces if f.prob >= min_prob] or faces
+        filtered = [f for f in faces if f.prob >= min_prob]
+        if not filtered:
+            logger.warning(
+                "No detections met min_prob=%.2f; falling back to all %d detection(s).",
+                min_prob,
+                len(faces),
+            )
+        faces_f = filtered or faces
 
         # Choose which face to align
         if pick == "best":
             selected = faces_f[0]
         else:
             selected = max(
-                faces_f,
-                key=lambda f: (f.box[2] - f.box[0]) * (f.box[3] - f.box[1])
+                faces_f, key=lambda f: (f.box[2] - f.box[0]) * (f.box[3] - f.box[1])
             )
 
         # Step 1: Square crop around face
