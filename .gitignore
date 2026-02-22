@@ -16,4 +16,7 @@ data/utk_face.zip
 ignore/*
 
 # Model files (too large for GitHub)
-models/
+models/**
+!models/
+!models/*/
+!models/**/.gitkeep
