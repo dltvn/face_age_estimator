@@ -14,25 +14,38 @@ def decode_and_resize(img_bytes: tf.Tensor, image_size: int) -> tf.Tensor:
 def load_image_for_inference(image_path: str, image_size: int) -> np.ndarray:
     img_bytes = tf.io.read_file(image_path)
     img = decode_and_resize(img_bytes, image_size)
-    img = tf.keras.applications.vgg16.preprocess_input(img)
+
+    # ResNet preprocessing (changed from VGG)
+    img = tf.keras.applications.resnet50.preprocess_input(img)
+
     img = tf.expand_dims(img, axis=0)
     return img.numpy()
 
 
 def main():
     parser = argparse.ArgumentParser()
+
     parser.add_argument(
         "--model",
         type=str,
         default="runs/age_run_1/checkpoints/age_stage2_best.keras",
         help="Path to trained .keras model",
     )
+
     parser.add_argument(
         "--image",
         type=str,
         required=True,
         help="Path to image for prediction",
     )
+
+    parser.add_argument(
+        "--true_age",
+        type=float,
+        default=None,
+        help="True age of the person in the image (optional)",
+    )
+
     parser.add_argument(
         "--image_size",
         type=int,
@@ -60,7 +73,17 @@ def main():
     else:
         predicted_age = float(np.squeeze(pred))
 
-    print(f"Predicted age: {predicted_age:.2f}")
+    print("\nResults")
+    print("-------------------")
+
+    if args.true_age is not None:
+        print(f"True age      : {args.true_age}")
+
+    print(f"Predicted age : {predicted_age:.2f}")
+
+    if args.true_age is not None:
+        error = abs(predicted_age - args.true_age)
+        print(f"Absolute error: {error:.2f}")
 
 
 if __name__ == "__main__":
