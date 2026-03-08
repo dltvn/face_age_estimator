@@ -303,37 +303,6 @@ face_age_estimator/
 
 ---
 
-## Development Workflow
-
-### 1. Feature Development
-- Create a new branch from `main`: `git checkout -b feature/age-prediction`
-- Write tests first (TDD encouraged)
-- Implement feature with proper type hints and docstrings
-- Format code: `black .`
-- Lint code: `ruff check --fix .`
-- Run tests: `pytest`
-- Commit with descriptive messages
-
-### 2. Commit Message Format
-```
-feat: add LDAE encoding for age labels
-fix: correct face alignment transformation
-docs: update preprocessing documentation
-test: add unit tests for gender classifier
-refactor: optimize batch preprocessing pipeline
-```
-
-### 3. Pull Request Checklist
-- [ ] All tests pass
-- [ ] Code formatted with Black
-- [ ] No linting errors
-- [ ] Type hints added
-- [ ] Docstrings added
-- [ ] No sensitive data committed
-- [ ] Model files excluded from commits (use .gitignore)
-
----
-
 ## Testing Standards
 
 ### Test File Organization
