@@ -2,7 +2,7 @@ import os
 import json
 import argparse
 from dataclasses import dataclass
-from typing import Tuple, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -21,13 +21,6 @@ def default_data_root() -> str:
 
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
-
-
-def find_first_existing(paths):
-    for p in paths:
-        if os.path.exists(p):
-            return p
-    return None
 
 
 def autodetect_column(df: pd.DataFrame, candidates) -> Optional[str]:
@@ -51,11 +44,12 @@ def build_image_path(data_root: str, rel_or_abs_path: str) -> str:
 
     rel_or_abs_path = str(rel_or_abs_path).replace("/", os.sep).replace("\\", os.sep)
 
+    if rel_or_abs_path.startswith("data" + os.sep):
+        rel_or_abs_path = rel_or_abs_path.replace("data" + os.sep, "", 1)
 
-    if rel_or_abs_path.startswith("data" + os.sep) or rel_or_abs_path.startswith("utk_face" + os.sep):
-        return os.path.normpath(os.path.join(data_root, rel_or_abs_path.replace("data" + os.sep, "")))
+    if rel_or_abs_path.startswith("utk_face" + os.sep):
+        return os.path.normpath(os.path.join(data_root, rel_or_abs_path))
 
- 
     return os.path.normpath(os.path.join(data_root, "utk_face", rel_or_abs_path))
 
 
@@ -71,96 +65,14 @@ def load_image_tensor(path: tf.Tensor, image_size: int) -> tf.Tensor:
     return decode_and_resize(img_bytes, image_size)
 
 
-def maybe_set_seed(seed: int) -> None:
+def maybe_set_seed(seed: Optional[int]) -> None:
     if seed is None:
         return
     tf.keras.utils.set_random_seed(seed)
-    tf.config.experimental.enable_op_determinism()
-
-
-def try_import_mtcnn():
     try:
-        import mtcnn 
-        return mtcnn.MTCNN
+        tf.config.experimental.enable_op_determinism()
     except Exception:
-        return None
-
-
-def try_import_vggface():
-    try:
-        from keras_vggface.vggface import VGGFace  
-        return VGGFace
-    except Exception:
-        return None
-
-
-def align_faces_with_mtcnn(
-    df: pd.DataFrame,
-    data_root: str,
-    img_col: str,
-    out_dir: str,
-    image_size: int,
-    limit: Optional[int] = None,
-) -> pd.DataFrame:
-    """
-    Proposal alignment step: MTCNN detects face and 5 landmarks.
-    For a baseline, we crop using the detected bounding box.
-    This keeps the pipeline aligned with the proposal and is reliable.
-
-    Output: new column 'aligned_path' pointing to saved aligned face images.
-    """
-    MTCNN = try_import_mtcnn()
-    if MTCNN is None:
-        raise RuntimeError(
-            "MTCNN is not installed. Install it with: python -m pip install mtcnn opencv-python"
-        )
-
-    import cv2  # type: ignore
-
-    ensure_dir(out_dir)
-    detector = MTCNN()
-
-    rows = []
-    n = len(df) if limit is None else min(len(df), limit)
-
-    for i in range(n):
-        row = df.iloc[i].to_dict()
-        src = str(row[img_col])
-        src_path = build_image_path(data_root, src)
-
-        img_bgr = cv2.imread(src_path)
-        if img_bgr is None:
-            continue
-
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        dets = detector.detect_faces(img_rgb)
-
-        if not dets:
-            continue
-
-        det = max(dets, key=lambda d: d.get("confidence", 0.0))
-        x, y, w, h = det["box"]
-        x = max(0, x)
-        y = max(0, y)
-        w = max(1, w)
-        h = max(1, h)
-
-        face = img_rgb[y : y + h, x : x + w]
-        if face.size == 0:
-            continue
-
-        face = cv2.resize(face, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
-
-        out_path = os.path.join(out_dir, f"aligned_{i:07d}.jpg")
-        cv2.imwrite(out_path, cv2.cvtColor(face, cv2.COLOR_RGB2BGR))
-
-        row["aligned_path"] = out_path
-        rows.append(row)
-
-    out_df = pd.DataFrame(rows)
-    if len(out_df) == 0:
-        raise RuntimeError("No faces were aligned. Check your CSV paths and images.")
-    return out_df
+        pass
 
 
 @dataclass
@@ -170,47 +82,33 @@ class BackboneInfo:
     name: str
 
 
-def build_backbone(image_size: int, force_backbone: str = "auto") -> BackboneInfo:
-    """
-    Proposal wants VGGFace backbone.
-    We try keras_vggface first.
-    If unavailable, we use VGG16 as a compatible baseline backbone.
-    """
-    if force_backbone.lower() not in ["auto", "vggface", "vgg16"]:
-        raise ValueError("force_backbone must be one of: auto, vggface, vgg16")
+def build_backbone(image_size: int, force_backbone: str = "resnet50") -> BackboneInfo:
+    allowed = ["resnet50"]
+    if force_backbone.lower() not in allowed:
+        raise ValueError(f"force_backbone must be one of: {allowed}")
 
-    VGGFace = try_import_vggface()
-    if force_backbone.lower() in ["auto", "vggface"] and VGGFace is not None:
-        # keras_vggface returns a Keras model
-        base = VGGFace(model="vgg16", include_top=False, input_shape=(image_size, image_size, 3))
-        def preprocess(x):
-            # keras_vggface expects BGR with mean subtraction typically.
-            # We keep it simple and use tf.keras VGG16 preprocess which is close.
-            return tf.keras.applications.vgg16.preprocess_input(x)
-        return BackboneInfo(model=base, preprocess_fn=preprocess, name="vggface_vgg16")
-
-    # Fallback baseline
-    base = tf.keras.applications.VGG16(
+    base = tf.keras.applications.ResNet50(
         include_top=False,
         weights="imagenet",
         input_shape=(image_size, image_size, 3),
     )
+
     return BackboneInfo(
         model=base,
-        preprocess_fn=tf.keras.applications.vgg16.preprocess_input,
-        name="vgg16_imagenet_fallback",
+        preprocess_fn=tf.keras.applications.resnet50.preprocess_input,
+        name="resnet50_imagenet",
     )
 
 
 def build_age_model(backbone: tf.keras.Model, image_size: int, dropout: float) -> tf.keras.Model:
-    inputs = tf.keras.Input(shape=(image_size, image_size, 3))
+    inputs = tf.keras.Input(shape=(image_size, image_size, 3), name="image")
     x = backbone(inputs, training=False)
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dropout(dropout)(x)
     x = tf.keras.layers.Dense(256, activation="relu")(x)
     x = tf.keras.layers.Dropout(dropout)(x)
-    outputs = tf.keras.layers.Dense(1, activation="linear")(x)
-    return tf.keras.Model(inputs=inputs, outputs=outputs)
+    outputs = tf.keras.layers.Dense(1, activation="linear", name="predicted_age")(x)
+    return tf.keras.Model(inputs=inputs, outputs=outputs, name="resnet50_age_regressor")
 
 
 def df_to_dataset(
@@ -253,11 +151,7 @@ def main():
 
     parser.add_argument("--data_root", type=str, default=default_data_root())
 
- 
-    parser.add_argument("--train_csv", type=str, default="data/splits/train_age_male.csv")
-    parser.add_argument("--val_csv", type=str, default="data/splits/val_age_male.csv")
 
-    # Auto detect if your CSV uses different column names
     parser.add_argument("--img_col", type=str, default="auto")
     parser.add_argument("--label_col", type=str, default="auto")
 
@@ -271,11 +165,9 @@ def main():
     parser.add_argument("--lr_stage1", type=float, default=1e-3)
     parser.add_argument("--lr_stage2", type=float, default=1e-5)
 
-    # Proposal style backbone
-    parser.add_argument("--backbone", type=str, default="auto")  # auto, vggface, vgg16
-
+    parser.add_argument("--backbone", type=str, default="resnet50")
     parser.add_argument("--run_dir", type=str, default="runs/age_run_1")
-    parser.add_argument("--limit", type=int, default=0) 
+    parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args()
@@ -284,10 +176,23 @@ def main():
     ensure_dir(args.run_dir)
     ensure_dir("runs")
 
-    train_df = load_split_csv(args.train_csv)
-    val_df = load_split_csv(args.val_csv)
+    # Load male + female splits and combine them
+    train_male = load_split_csv("data/splits/train_age_male.csv")
+    train_female = load_split_csv("data/splits/train_age_female.csv")
 
-    # Detect columns
+    val_male = load_split_csv("data/splits/val_age_male.csv")
+    val_female = load_split_csv("data/splits/val_age_female.csv")
+
+    train_df = pd.concat([train_male, train_female], ignore_index=True)
+    val_df = pd.concat([val_male, val_female], ignore_index=True)
+
+    print(f"Combined training samples: {len(train_df)}")
+    print(f"Combined validation samples: {len(val_df)}")
+
+    if args.limit > 0:
+        train_df = train_df.iloc[: args.limit].reset_index(drop=True)
+        val_df = val_df.iloc[: min(args.limit, len(val_df))].reset_index(drop=True)
+
     if args.img_col == "auto":
         img_col = autodetect_column(train_df, ["path", "filepath", "file", "filename", "image", "img"])
         if img_col is None:
@@ -302,41 +207,27 @@ def main():
     else:
         label_col = args.label_col
 
-    # Proposal: MTCNN detection and alignment
-    aligned_dir_train = os.path.join(args.run_dir, "aligned_train")
-    aligned_dir_val = os.path.join(args.run_dir, "aligned_val")
+    train_df = train_df.copy()
+    val_df = val_df.copy()
 
-    limit = None if args.limit == 0 else args.limit
+    train_df["resolved_image_path"] = train_df[img_col].apply(lambda p: build_image_path(args.data_root, p))
+    val_df["resolved_image_path"] = val_df[img_col].apply(lambda p: build_image_path(args.data_root, p))
 
-    train_aligned = align_faces_with_mtcnn(
-        df=train_df,
-        data_root=args.data_root,
-        img_col=img_col,
-        out_dir=aligned_dir_train,
-        image_size=args.image_size,
-        limit=limit,
-    )
+    train_df = train_df[train_df["resolved_image_path"].apply(os.path.exists)].reset_index(drop=True)
+    val_df = val_df[val_df["resolved_image_path"].apply(os.path.exists)].reset_index(drop=True)
 
-    val_aligned = align_faces_with_mtcnn(
-        df=val_df,
-        data_root=args.data_root,
-        img_col=img_col,
-        out_dir=aligned_dir_val,
-        image_size=args.image_size,
-        limit=limit,
-    )
+    if len(train_df) == 0:
+        raise RuntimeError("No valid training images found after resolving paths.")
+    if len(val_df) == 0:
+        raise RuntimeError("No valid validation images found after resolving paths.")
 
-    # Save aligned CSVs for reproducibility
-    train_aligned_csv = os.path.join(args.run_dir, "train_aligned.csv")
-    val_aligned_csv = os.path.join(args.run_dir, "val_aligned.csv")
-    train_aligned.to_csv(train_aligned_csv, index=False)
-    val_aligned.to_csv(val_aligned_csv, index=False)
+    print(f"Training samples: {len(train_df)}")
+    print(f"Validation samples: {len(val_df)}")
 
     backbone_info = build_backbone(args.image_size, force_backbone=args.backbone)
     backbone = backbone_info.model
     preprocess_fn = backbone_info.preprocess_fn
 
-    # Stage 1: freeze backbone
     backbone.trainable = False
     model = build_age_model(backbone, args.image_size, args.dropout)
     model.compile(
@@ -346,13 +237,24 @@ def main():
     )
 
     train_ds = df_to_dataset(
-        train_aligned, args.image_size, args.batch_size, True, "aligned_path", label_col, preprocess_fn
+        train_df,
+        args.image_size,
+        args.batch_size,
+        True,
+        "resolved_image_path",
+        label_col,
+        preprocess_fn,
     )
     val_ds = df_to_dataset(
-        val_aligned, args.image_size, args.batch_size, False, "aligned_path", label_col, preprocess_fn
+        val_df,
+        args.image_size,
+        args.batch_size,
+        False,
+        "resolved_image_path",
+        label_col,
+        preprocess_fn,
     )
 
-    # Checkpointing
     ckpt_dir = os.path.join(args.run_dir, "checkpoints")
     ensure_dir(ckpt_dir)
 
@@ -361,7 +263,7 @@ def main():
     last_model = os.path.join(ckpt_dir, "age_last.keras")
     history_csv = os.path.join(args.run_dir, "history.csv")
 
-    callbacks_common = [
+    callbacks_stage1 = [
         tf.keras.callbacks.ModelCheckpoint(stage1_best, monitor="val_mae", save_best_only=True, mode="min"),
         tf.keras.callbacks.ModelCheckpoint(last_model, save_best_only=False),
         tf.keras.callbacks.CSVLogger(history_csv, append=os.path.exists(history_csv)),
@@ -369,7 +271,6 @@ def main():
         tf.keras.callbacks.ReduceLROnPlateau(monitor="val_mae", factor=0.5, patience=2, min_lr=1e-7),
     ]
 
-    # Resume if last exists
     if os.path.exists(last_model):
         try:
             model = tf.keras.models.load_model(last_model)
@@ -401,19 +302,24 @@ def main():
         train_ds,
         validation_data=val_ds,
         epochs=args.epochs_stage1,
-        callbacks=callbacks_common,
+        callbacks=callbacks_stage1,
     )
 
-    # Stage 2: fine tune top of backbone
     print("Stage 2 Fine tuning")
-    backbone = model.layers[1] if isinstance(model.layers[1], tf.keras.Model) else None
 
-    # Unfreeze last blocks gradually
-    # This works for VGG style models
+    backbone = model.layers[1] if isinstance(model.layers[1], tf.keras.Model) else None
     if backbone is not None:
         backbone.trainable = True
-        for layer in backbone.layers[:-4]:
+
+        # Freeze most layers, unfreeze only the top portion for fine tuning.
+        # This is a safer generic setting for ResNet50.
+        fine_tune_from = max(0, len(backbone.layers) - 30)
+        for layer in backbone.layers[:fine_tune_from]:
             layer.trainable = False
+
+        for layer in backbone.layers[fine_tune_from:]:
+            if isinstance(layer, tf.keras.layers.BatchNormalization):
+                layer.trainable = False
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=args.lr_stage2),
@@ -441,8 +347,6 @@ def main():
     print(f"Best stage 2: {stage2_best}")
     print(f"Last model: {last_model}")
     print(f"History: {history_csv}")
-    print(f"Aligned train csv: {train_aligned_csv}")
-    print(f"Aligned val csv: {val_aligned_csv}")
 
 
 if __name__ == "__main__":
