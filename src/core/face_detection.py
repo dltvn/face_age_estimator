@@ -8,52 +8,57 @@ from typing import Any, Optional
 import cv2
 import numpy as np
 
+try:
+    from mtcnn.mtcnn import MTCNN  # TensorFlow/Keras-based implementation
+except Exception as e:
+    raise ImportError("Install mtcnn (TF/Keras): pip install mtcnn tensorflow") from e
+
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+# Landmarks array shape: (5, 2)
+# Order: left_eye, right_eye, nose, mouth_left, mouth_right
+Landmarks5 = np.ndarray
 
 Landmarks5 = np.ndarray  # shape (5, 2), dtype float32
 
-_CANONICAL_SIZE: tuple[int, int] = (112, 112)
-
-_LANDMARK_TEMPLATE = np.array(
-    [
-        [38.2946, 51.6963],  # left_eye
-        [73.5318, 51.5014],  # right_eye
-        [56.0252, 71.7366],  # nose
-        [41.5493, 92.3655],  # mouth_left
-        [70.7299, 92.2041],  # mouth_right
-    ],
-    dtype=np.float32,
-)
-
-# MediaPipe Face Mesh indices for the 5 canonical landmarks
-# https://github.com/google/mediapipe/blob/master/mediapipe/modules/face_geometry/data/canonical_face_model_uv_visualization.png
-_MP_LEFT_EYE_IDX   = 468  # refined left eye center (requires refine_landmarks=True)
-_MP_RIGHT_EYE_IDX  = 473  # refined right eye center
-_MP_NOSE_IDX       = 1    # nose tip
-_MP_MOUTH_L_IDX    = 61   # left mouth corner
-_MP_MOUTH_R_IDX    = 291  # right mouth corner
-
-
-# ---------------------------------------------------------------------------
-# Data class
-# ---------------------------------------------------------------------------
-
 @dataclass
 class DetectedFace:
-    box: np.ndarray        # (4,) [x1, y1, x2, y2]
+    """
+    Represents one detected face.
+
+    box:
+        Bounding box in [x1, y1, x2, y2] format.
+    prob:
+        Detection confidence (0 to 1).
+    landmarks:
+        The 5 facial keypoints returned by MTCNN.
+    """
+
+    box: np.ndarray
     prob: float
-    landmarks: Landmarks5  # (5, 2)
+    landmarks: Landmarks5
 
 
-# ---------------------------------------------------------------------------
-# Alignment helpers
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------
+# This defines where we WANT the 5 facial landmarks to end up
+# after alignment.
+#
+# These coordinates come from ArcFace.
+# Think of this as the "ideal face layout".
+# -------------------------------------------------------------
+def _template_5pts(output_size: tuple[int, int]) -> np.ndarray:
+    ref = np.array(
+        [
+            [38.2946, 51.6963],  # left eye
+            [73.5318, 51.5014],  # right eye
+            [56.0252, 71.7366],  # nose
+            [41.5493, 92.3655],  # left mouth
+            [70.7299, 92.2041],  # right mouth
+        ],
+        dtype=np.float32,
+    )
 
-def _get_landmark_template(output_size: tuple[int, int] = _CANONICAL_SIZE) -> np.ndarray:
+    # Scale template to match output image size
     w, h = output_size
     template = _LANDMARK_TEMPLATE.copy()
     template[:, 0] *= w / 112.0
@@ -61,120 +66,176 @@ def _get_landmark_template(output_size: tuple[int, int] = _CANONICAL_SIZE) -> np
     return template
 
 
-def estimate_affine_from_5pts(src_landmarks: Landmarks5) -> np.ndarray:
+# -------------------------------------------------------------
+# Using the detected 5 landmarks, compute an affine transform
+# that maps them to the canonical template.
+#
+# This transform handles:
+#   - rotation
+#   - scaling
+#   - translation
+#
+# It does NOT change pose (no 3D correction).
+# -------------------------------------------------------------
+def estimate_affine_from_5pts(
+    src_landmarks: Landmarks5, output_size: tuple[int, int]
+) -> np.ndarray:
     if src_landmarks.shape != (5, 2):
-        raise ValueError(f"Expected landmarks shape (5, 2), got {src_landmarks.shape}")
-    dst = _get_landmark_template(_CANONICAL_SIZE)
+        raise ValueError(f"Expected (5,2) landmarks, got {src_landmarks.shape}")
+
+    dst = _template_5pts(output_size=output_size)
+
     M, _ = cv2.estimateAffinePartial2D(
         src_landmarks.astype(np.float32), dst, method=cv2.LMEDS,
     )
+
     if M is None:
-        raise RuntimeError("Affine estimation failed — degenerate landmark positions.")
+        raise RuntimeError("Could not estimate affine transform from landmarks.")
+
     return M.astype(np.float32)
 
 
+# -------------------------------------------------------------
+# Makes sure the bounding box does not go outside the image.
+# Prevents slicing errors and weird crops.
+# -------------------------------------------------------------
+def _clip_xyxy(box: np.ndarray, width: int, height: int) -> np.ndarray:
+    x1, y1, x2, y2 = box.astype(np.float32)
+    x1 = float(np.clip(x1, 0, width - 1))
+    y1 = float(np.clip(y1, 0, height - 1))
+    x2 = float(np.clip(x2, 0, width - 1))
+    y2 = float(np.clip(y2, 0, height - 1))
+    return np.array([x1, y1, x2, y2], dtype=np.float32)
+
+
+# -------------------------------------------------------------
+# Instead of filling empty areas with black (ugly),
+# we use the average color of the crop.
+# This makes the padding look natural.
+# -------------------------------------------------------------
+def _mean_border_value(image_bgr: np.ndarray) -> tuple[int, int, int]:
+    mean = image_bgr.reshape(-1, 3).mean(axis=0)
+    return (int(mean[0]), int(mean[1]), int(mean[2]))
+
+
+# -------------------------------------------------------------
+# Applies the affine transform to actually align the face.
+#
+# The result is always a fixed-size image (e.g., 224x224).
+# -------------------------------------------------------------
 def warp_face(
-    image: np.ndarray,
-    M_2x3: np.ndarray,
-    output_size: tuple[int, int] = _CANONICAL_SIZE,
+    image_bgr: np.ndarray, M_2x3: np.ndarray, output_size: tuple[int, int]
 ) -> np.ndarray:
     w, h = output_size
+    border_value = _mean_border_value(image_bgr)
+
     return cv2.warpAffine(
-        image, M_2x3, (w, h),
+        image_bgr,
+        M_2x3,
+        (w, h),
         flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
+        borderValue=border_value,
     )
-
-
-# ---------------------------------------------------------------------------
-# MediaPipe detector (primary — Python 3.13 compatible, precise landmarks)
-# ---------------------------------------------------------------------------
 
 # Default model path — can be overridden via env var or constructor arg
 _DEFAULT_MODEL_PATH = os.path.join(
     os.path.expanduser("~"), ".mediapipe", "face_landmarker.task"
 )
 
+# -------------------------------------------------------------
+# Creates a square crop centered on the face.
+#
+# Why square?
+# Because alignment works best when the face region
+# is roughly symmetric and centered.
+#
+# Why margin?
+# Because without margin, parts of the face can get
+# cut off after rotation.
+# -------------------------------------------------------------
+def _square_crop_with_margin(
+    image_bgr: np.ndarray, box_xyxy: np.ndarray, margin: float
+):
+    h, w = image_bgr.shape[:2]
+    box = _clip_xyxy(box_xyxy, width=w, height=h)
+    x1, y1, x2, y2 = box
 
-class FaceDetectorMediaPipe:
-    """MediaPipe Face Landmarker detector.
+    bw = max(1.0, x2 - x1)
+    bh = max(1.0, y2 - y1)
 
-    Gives precise 478-point landmarks (including refined eye centers).
-    Works on Python 3.13, no TensorFlow required.
+    # Make the crop square using the larger dimension
+    side = max(bw, bh) * (1.0 + margin * 2.0)
 
-    Setup
-    -----
-    1. pip install mediapipe
-    2. Download the model (~30MB):
-       https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
-       Save to: ~/.mediapipe/face_landmarker.task
-       (or pass model_path= to the constructor)
+    # Center of the face
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+
+    cx1 = int(round(cx - side / 2.0))
+    cy1 = int(round(cy - side / 2.0))
+    cx2 = int(round(cx + side / 2.0))
+    cy2 = int(round(cy + side / 2.0))
+
+    # Keep crop inside image
+    cx1 = max(0, cx1)
+    cy1 = max(0, cy1)
+    cx2 = min(w, cx2)
+    cy2 = min(h, cy2)
+
+    crop = image_bgr[cy1:cy2, cx1:cx2].copy()
+
+    offset_xy = np.array([cx1, cy1], dtype=np.float32)
+    crop_box = np.array([cx1, cy1, cx2, cy2], dtype=np.int32)
+
+    return crop, offset_xy, crop_box
+
+
+class FaceDetectorMTCNN:
+    """
+    Face detector + aligner using MTCNN.
+
+    Pipeline:
+      1. Detect face + 5 keypoints
+      2. Pick best or largest face
+      3. Square crop with margin
+      4. Shift landmarks into crop space
+      5. Estimate affine transform
+      6. Warp to fixed size
     """
 
-    def __init__(
-        self,
-        model_path: Optional[str] = None,
-        min_detection_confidence: float = 0.3,
-        min_presence_confidence: float = 0.3,
-    ) -> None:
-        try:
-            import mediapipe as mp
-            from mediapipe.tasks.python import vision
-            from mediapipe.tasks.python.core.base_options import BaseOptions
-        except ImportError:
-            raise ImportError("pip install mediapipe")
-
-        path = model_path or os.environ.get("MP_FACE_LANDMARKER_MODEL", _DEFAULT_MODEL_PATH)
-        if not os.path.exists(path):
-            raise FileNotFoundError(
-                f"MediaPipe model not found at: {path}\n"
-                "Download from:\n"
-                "  https://storage.googleapis.com/mediapipe-models/face_landmarker/"
-                "face_landmarker/float16/1/face_landmarker.task\n"
-                f"Save to: {path}"
-            )
-
-        options = vision.FaceLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=path),
-            output_face_blendshapes=False,
-            output_facial_transformation_matrixes=False,
-            num_faces=1,
-            min_face_detection_confidence=min_detection_confidence,
-            min_face_presence_confidence=min_presence_confidence,
-        )
-        self._landmarker = vision.FaceLandmarker.create_from_options(options)
-        self._mp = mp
-        logger.info("FaceDetectorMediaPipe ready | model=%s", path)
+    def __init__(self) -> None:
+        self.detector = MTCNN()
 
     def detect(self, image_bgr: np.ndarray) -> list[DetectedFace]:
-        import mediapipe as mp
-
+        """
+        Runs MTCNN detection and returns a list of faces.
+        """
         rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        result = self._landmarker.detect(mp_image)
+        dets = self.detector.detect_faces(rgb) or []
 
-        if not result.face_landmarks:
-            return []
-
-        H, W = image_bgr.shape[:2]
         faces = []
 
-        for face_lm in result.face_landmarks:
-            lm = face_lm  # list of NormalizedLandmark
+        for d in dets:
+            conf = float(d.get("confidence", 0.0))
+            x, y, w_box, h_box = d["box"]
 
-            # Extract 5 key landmarks (denormalize to pixel coords)
-            def px(idx):
-                return np.array([lm[idx].x * W, lm[idx].y * H], dtype=np.float32)
+            x1, y1 = float(x), float(y)
+            x2, y2 = float(x + w_box), float(y + h_box)
 
-            left_eye  = px(_MP_LEFT_EYE_IDX)
-            right_eye = px(_MP_RIGHT_EYE_IDX)
-            nose      = px(_MP_NOSE_IDX)
-            mouth_l   = px(_MP_MOUTH_L_IDX)
-            mouth_r   = px(_MP_MOUTH_R_IDX)
+            kp = d.get("keypoints", {})
+            if not kp:
+                continue
 
-            landmarks = np.array([left_eye, right_eye, nose, mouth_l, mouth_r],
-                                 dtype=np.float32)
+            lm = np.array(
+                [
+                    kp["left_eye"],
+                    kp["right_eye"],
+                    kp["nose"],
+                    kp["mouth_left"],
+                    kp["mouth_right"],
+                ],
+                dtype=np.float32,
+            )
 
             # Derive bounding box from all landmarks
             xs = np.array([l.x * W for l in lm])
@@ -195,46 +256,57 @@ class FaceDetectorMediaPipe:
     def detect_and_align(
         self,
         image_bgr: np.ndarray,
-        min_prob: float = 0.0,
-        pick: str = "best",
-        margin: float = 0.35,
-        return_resized: Optional[tuple[int, int]] = None,
+        output_size: tuple[int, int] = (224, 224),
+        min_prob: float = 0.85,
+        pick: str = "largest",
+        margin: float = 0.50,
     ) -> dict[str, Any]:
+        if image_bgr.ndim != 3 or image_bgr.shape[2] != 3:
+            raise ValueError(
+                f"Expected a 3-channel BGR image, got shape {image_bgr.shape}"
+            )
+
         faces = self.detect(image_bgr)
         if not faces:
             return {"faces": [], "selected": None}
 
-        if pick == "largest":
-            def _area(f: DetectedFace) -> float:
-                x1, y1, x2, y2 = f.box
-                return max(0.0, x2 - x1) * max(0.0, y2 - y1)
-            selected = max(faces, key=_area)
+        filtered = [f for f in faces if f.prob >= min_prob]
+        if not filtered:
+            logger.warning(
+                "No detections met min_prob=%.2f; falling back to all %d detection(s).",
+                min_prob,
+                len(faces),
+            )
+        faces_f = filtered or faces
+
+        # Choose which face to align
+        if pick == "best":
+            selected = faces_f[0]
         else:
-            selected = faces[0]
+            selected = max(
+                faces_f, key=lambda f: (f.box[2] - f.box[0]) * (f.box[3] - f.box[1])
+            )
 
-        H, W = image_bgr.shape[:2]
-        x1, y1, x2, y2 = selected.box.astype(int)
-        bw, bh = max(1, x2 - x1), max(1, y2 - y1)
-        pad_x, pad_y = int(bw * margin), int(bh * margin)
-        cx1 = max(0, x1 - pad_x)
-        cy1 = max(0, y1 - pad_y)
-        cx2 = min(W, x2 + pad_x)
-        cy2 = min(H, y2 + pad_y)
+        # Step 1: Square crop around face
+        crop_bgr, offset_xy, crop_box = _square_crop_with_margin(
+            image_bgr, selected.box, margin
+        )
 
-        crop = image_bgr[cy1:cy2, cx1:cx2].copy()
-        lm = selected.landmarks.copy()
-        lm[:, 0] -= cx1
-        lm[:, 1] -= cy1
+        # Step 2: Convert landmarks into crop coordinate system
+        lm_crop = selected.landmarks.astype(np.float32) - offset_xy
 
-        M = estimate_affine_from_5pts(lm)
-        aligned = warp_face(crop, M, output_size=_CANONICAL_SIZE)
+        # Step 3: Compute transform that moves face into template layout
+        M = estimate_affine_from_5pts(lm_crop, output_size)
 
-        result: dict[str, Any] = {
+        # Step 4: Warp image using that transform
+        aligned = warp_face(crop_bgr, M, output_size)
+
+        return {
             "faces": faces,
             "selected": selected,
             "affine": M,
             "aligned_bgr": aligned,
-            "crop_box": np.array([cx1, cy1, cx2, cy2], dtype=np.int32),
+            "crop_box": crop_box,
         }
         if return_resized is not None:
             rw, rh = return_resized
