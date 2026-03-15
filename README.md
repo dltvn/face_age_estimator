@@ -1,11 +1,3 @@
----
-title: Face Age Estimator API
-emoji: ":adult:"
-colorFrom: blue
-colorTo: green
-sdk: docker
-pinned: false
----
 
 # Face Age Estimator API
 
