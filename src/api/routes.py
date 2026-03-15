@@ -43,6 +43,16 @@ class GenderSpecificAgeWithCropResponse(BaseModel):
     cropped_image_mime_type: str = "image/jpeg"
 
 
+class RaceWithCropResponse(BaseModel):
+    """Response schema for race prediction + cropped image endpoint."""
+
+    race: str
+    confidence: float
+    probabilities: dict[str, float]
+    cropped_image_base64: str
+    cropped_image_mime_type: str = "image/jpeg"
+
+
 def _read_upload_bytes(upload: UploadFile) -> bytes:
     """Read uploaded file bytes with basic validation."""
     if not upload.content_type or not upload.content_type.startswith("image/"):
@@ -134,5 +144,29 @@ def predict_age_gender_specific_with_crop(
         predicted_age=age_pred.predicted_age,
         confidence=age_pred.confidence,
         distribution=age_pred.distribution,
+        cropped_image_base64=cropped_b64,
+    )
+
+
+@router.post("/predict/race-with-crop", response_model=RaceWithCropResponse)
+def predict_race_with_crop(file: UploadFile = File(...)) -> RaceWithCropResponse:
+    """Predict race and include cropped/aligned face image."""
+    service = get_inference_service()
+    try:
+        image_bytes = _read_upload_bytes(file)
+        image_bgr = service.decode_image_bytes(image_bytes)
+        pre = service.preprocess_face(image_bgr)
+        pred = service.predict_race(pre.aligned_bgr)
+        cropped_jpeg = service.encode_jpeg(pre.aligned_bgr)
+        cropped_b64 = base64.b64encode(cropped_jpeg).decode("utf-8")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return RaceWithCropResponse(
+        race=pred.race,
+        confidence=pred.confidence,
+        probabilities=pred.probabilities,
         cropped_image_base64=cropped_b64,
     )

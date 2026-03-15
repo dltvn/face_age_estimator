@@ -20,6 +20,13 @@ DEFAULT_HF_LOCAL_DIR = PROJECT_ROOT / ".cache" / "hf_models"
 HF_MODEL_REPO_ID = "d-ltvn/chronolens-models"
 DEFAULT_IMAGE_SIZE = (224, 224)
 AGE_BINS = np.arange(117, dtype=np.float32)
+RACE_LABELS = {
+    0: "white",
+    1: "black",
+    2: "asian",
+    3: "indian",
+    4: "others",
+}
 
 
 @dataclass
@@ -30,6 +37,7 @@ class ModelPaths:
     age_agnostic: Path
     age_male: Path
     age_female: Path
+    race: Path
 
     @classmethod
     def from_root(cls, root: Path) -> "ModelPaths":
@@ -39,6 +47,7 @@ class ModelPaths:
             age_agnostic=(root / "baseline_age_model_improved" / "best_baseline_age_model_improved.keras"),
             age_male=root / "male_age_model" / "best_male_age_model.keras",
             age_female=root / "female_age_model" / "best_female_age_model.keras",
+            race=root / "race_classifier" / "best_race_model.keras",
         )
 
 
@@ -62,6 +71,15 @@ class AgePrediction:
 
 
 @dataclass
+class RacePrediction:
+    """Race prediction result."""
+
+    race: str
+    confidence: float
+    probabilities: dict[str, float]
+
+
+@dataclass
 class PreprocessResult:
     """Face preprocessing output for downstream inference."""
 
@@ -79,6 +97,16 @@ class InferenceService:
         self.age_agnostic_model = tf.keras.models.load_model(str(self.paths.age_agnostic), compile=False)
         self.age_male_model = tf.keras.models.load_model(str(self.paths.age_male), compile=False)
         self.age_female_model = tf.keras.models.load_model(str(self.paths.age_female), compile=False)
+        self.race_model = (
+            tf.keras.models.load_model(str(self.paths.race), compile=False)
+            if self.paths.race.exists()
+            else None
+        )
+        if self.race_model is None:
+            logger.warning(
+                "Race model file not found at %s; race endpoint will be unavailable.",
+                self.paths.race,
+            )
         logger.info("Models loaded successfully.")
 
     @staticmethod
@@ -117,6 +145,7 @@ class InferenceService:
                 "baseline_age_model_improved/best_baseline_age_model_improved.keras",
                 "male_age_model/best_male_age_model.keras",
                 "female_age_model/best_female_age_model.keras",
+                "race_classifier/best_race_model.keras",
             ],
         )
         return Path(snapshot_dir)
@@ -229,6 +258,36 @@ class InferenceService:
         else:
             dist = self.age_male_model.predict(tensor, verbose=0)
         return self._decode_age_distribution(dist)
+
+    def predict_race(self, aligned_bgr: np.ndarray) -> RacePrediction:
+        """Predict race from aligned face image."""
+        if self.race_model is None:
+            raise FileNotFoundError(
+                f"Race model file not found at {self.paths.race}. "
+                "Add race_classifier/best_race_model.keras to the model repo."
+            )
+
+        tensor = self._to_model_tensor(aligned_bgr)
+        pred = self.race_model.predict(tensor, verbose=0).reshape(-1)
+        if pred.shape[0] != len(RACE_LABELS):
+            raise ValueError(
+                f"Expected {len(RACE_LABELS)} race logits, got {pred.shape[0]}"
+            )
+
+        probs = pred.astype(np.float32)
+        probs = probs / np.clip(probs.sum(), 1e-8, None)
+        pred_idx = int(np.argmax(probs))
+        race = RACE_LABELS[pred_idx]
+        confidence = float(np.max(probs))
+        probabilities = {
+            RACE_LABELS[idx]: float(probs[idx])
+            for idx in range(len(RACE_LABELS))
+        }
+        return RacePrediction(
+            race=race,
+            confidence=confidence,
+            probabilities=probabilities,
+        )
 
 
 @lru_cache(maxsize=1)
