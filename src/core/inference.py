@@ -107,6 +107,7 @@ class InferenceService:
                 "Race model file not found at %s; race endpoint will be unavailable.",
                 self.paths.race,
             )
+        self._warmup_models()
         logger.info("Models loaded successfully.")
 
     @staticmethod
@@ -205,13 +206,35 @@ class InferenceService:
     def _to_model_tensor(aligned_bgr: np.ndarray) -> np.ndarray:
         """Convert aligned BGR image to normalized ResNet50 model tensor."""
         image_rgb = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
+        if image_rgb.shape[:2] != DEFAULT_IMAGE_SIZE:
+            # Keep model input shape stable to reduce retracing overhead.
+            image_rgb = cv2.resize(image_rgb, DEFAULT_IMAGE_SIZE, interpolation=cv2.INTER_LINEAR)
         image_rgb = preprocess_input(image_rgb)
         return np.expand_dims(image_rgb, axis=0)
+
+    @staticmethod
+    def _run_model(model: tf.keras.Model, tensor: np.ndarray) -> np.ndarray:
+        """Run one forward pass using direct model call for lower overhead."""
+        outputs = model(tf.convert_to_tensor(tensor, dtype=tf.float32), training=False)
+        return np.asarray(outputs)
+
+    def _warmup_models(self) -> None:
+        """Run one dry forward pass per model to avoid first-request latency."""
+        dummy = np.zeros((1, DEFAULT_IMAGE_SIZE[0], DEFAULT_IMAGE_SIZE[1], 3), dtype=np.float32)
+        for model in (
+            self.gender_model,
+            self.age_agnostic_model,
+            self.age_male_model,
+            self.age_female_model,
+            self.race_model,
+        ):
+            if model is not None:
+                _ = self._run_model(model, dummy)
 
     def predict_gender(self, aligned_bgr: np.ndarray) -> GenderPrediction:
         """Predict gender from aligned face image."""
         tensor = self._to_model_tensor(aligned_bgr)
-        pred = self.gender_model.predict(tensor, verbose=0).squeeze()
+        pred = self._run_model(self.gender_model, tensor).squeeze()
         prob_female = float(np.clip(pred, 0.0, 1.0))
         prob_male = float(1.0 - prob_female)
         gender = "female" if prob_female >= 0.5 else "male"
@@ -243,7 +266,7 @@ class InferenceService:
     def predict_age_agnostic(self, aligned_bgr: np.ndarray) -> AgePrediction:
         """Predict age distribution with the gender-agnostic age model."""
         tensor = self._to_model_tensor(aligned_bgr)
-        dist = self.age_agnostic_model.predict(tensor, verbose=0)
+        dist = self._run_model(self.age_agnostic_model, tensor)
         return self._decode_age_distribution(dist)
 
     def predict_age_gender_specific(
@@ -254,9 +277,9 @@ class InferenceService:
         """Predict age distribution using male/female specific model."""
         tensor = self._to_model_tensor(aligned_bgr)
         if gender == "female":
-            dist = self.age_female_model.predict(tensor, verbose=0)
+            dist = self._run_model(self.age_female_model, tensor)
         else:
-            dist = self.age_male_model.predict(tensor, verbose=0)
+            dist = self._run_model(self.age_male_model, tensor)
         return self._decode_age_distribution(dist)
 
     def predict_race(self, aligned_bgr: np.ndarray) -> RacePrediction:
@@ -268,7 +291,7 @@ class InferenceService:
             )
 
         tensor = self._to_model_tensor(aligned_bgr)
-        pred = self.race_model.predict(tensor, verbose=0).reshape(-1)
+        pred = self._run_model(self.race_model, tensor).reshape(-1)
         if pred.shape[0] != len(RACE_LABELS):
             raise ValueError(
                 f"Expected {len(RACE_LABELS)} race logits, got {pred.shape[0]}"
