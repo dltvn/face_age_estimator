@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+.pytest_cache
+.ruff_cache
+
+data
+ignore
+models
+notebooks
+tests
+
+*.ipynb
+*.log
