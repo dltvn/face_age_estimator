@@ -1,8 +1,8 @@
 """Tests for FaceDetectorMTCNN.detect_and_align — the public API.
 
 MTCNN is mocked throughout so that no TensorFlow model is loaded during
-testing. The mock is applied at the point of use inside face_detection.py
-so that the real class is never instantiated.
+testing. The mock is applied at the point of use inside
+face_detection_mtcnn.py so that the real class is never instantiated.
 """
 
 from __future__ import annotations
@@ -50,8 +50,8 @@ def _make_mtcnn_detection(
 
 @pytest.fixture
 def mock_mtcnn():
-    """Patch MTCNN inside face_detection so no TF model is loaded."""
-    with patch("src.core.face_detection.MTCNN") as MockClass:
+    """Patch MTCNN inside face_detection_mtcnn so no TF model is loaded."""
+    with patch("src.core.face_detection_mtcnn.MTCNN") as MockClass:
         instance = MagicMock()
         MockClass.return_value = instance
         yield instance  # callers set instance.detect_faces.return_value
@@ -60,7 +60,7 @@ def mock_mtcnn():
 @pytest.fixture
 def detector(mock_mtcnn):
     """FaceDetectorMTCNN with MTCNN replaced by a mock."""
-    from src.core.face_detection import FaceDetectorMTCNN
+    from src.core.face_detection_mtcnn import FaceDetectorMTCNN
 
     return FaceDetectorMTCNN()
 
@@ -159,7 +159,7 @@ class TestDetectAndAlign:
         # detections (rather than returning None) and log a warning so the caller
         # is aware the threshold was not met.
         mock_mtcnn.detect_faces.return_value = [_make_mtcnn_detection(confidence=0.60)]
-        with caplog.at_level(logging.WARNING, logger="src.core.face_detection"):
+        with caplog.at_level(logging.WARNING, logger="src.core.face_detection_mtcnn"):
             result = detector.detect_and_align(_BLANK_BGR, min_prob=0.90)
 
         assert result["selected"] is not None
