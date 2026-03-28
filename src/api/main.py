@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import router as inference_router
 from src.core.inference import get_inference_service
+from src.utils.prediction_logging import initialize_prediction_log_db
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,8 @@ async def lifespan(_: FastAPI):
     """Preload models on startup to avoid first-request download latency."""
     logger.info("Preloading inference service...")
     get_inference_service()
+    db_path = initialize_prediction_log_db()
+    logger.info("Prediction logs will be stored at %s", db_path)
     logger.info("Inference service ready.")
     yield
 
@@ -36,7 +39,9 @@ cors_origins = os.getenv("CORS_ALLOW_ORIGINS", "*")
 if cors_origins.strip() == "*":
     allow_origins = ["*"]
 else:
-    allow_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
+    allow_origins = [
+        origin.strip() for origin in cors_origins.split(",") if origin.strip()
+    ]
 
 app.add_middleware(
     CORSMiddleware,

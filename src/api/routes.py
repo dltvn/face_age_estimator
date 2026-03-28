@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import base64
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from src.core.inference import get_inference_service
+from src.utils.prediction_logging import (
+    get_recent_prediction_logs,
+    log_prediction_request,
+)
 
 router = APIRouter(prefix="/api", tags=["inference"])
 
@@ -89,6 +93,28 @@ class PredictAllWithCropResponse(BaseModel):
     cropped_image_mime_type: str = "image/jpeg"
 
 
+class PredictionLogEntry(BaseModel):
+    """Response schema for a single prediction log entry."""
+
+    id: int
+    endpoint_name: str
+    request_timestamp: str
+    predicted_gender: str | None = None
+    gender_confidence: float | None = None
+    prob_female: float | None = None
+    prob_male: float | None = None
+    age_agnostic_predicted_age: int | None = None
+    age_agnostic_confidence: float | None = None
+    age_agnostic_distribution: list[float] | None = None
+    age_gender_specific_predicted_age: int | None = None
+    age_gender_specific_confidence: float | None = None
+    age_gender_specific_distribution: list[float] | None = None
+    predicted_race: str | None = None
+    race_confidence: float | None = None
+    race_probabilities: dict[str, float] | None = None
+    error_message: str | None = None
+
+
 def _read_upload_bytes(upload: UploadFile) -> bytes:
     """Read uploaded file bytes with basic validation."""
     if not upload.content_type or not upload.content_type.startswith("image/"):
@@ -98,6 +124,16 @@ def _read_upload_bytes(upload: UploadFile) -> bytes:
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded image is empty.")
     return data
+
+
+@router.get("/logs/recent", response_model=list[PredictionLogEntry], tags=["logs"])
+def get_recent_logs(
+    limit: int = Query(
+        10, ge=1, le=1000, description="Number of recent logs to return."
+    ),
+) -> list[PredictionLogEntry]:
+    """Return the most recent prediction log entries."""
+    return [PredictionLogEntry(**row) for row in get_recent_prediction_logs(limit)]
 
 
 @router.post("/predict/all-with-crop", response_model=PredictAllWithCropResponse)
@@ -120,9 +156,25 @@ def predict_all_with_crop(file: UploadFile = File(...)) -> PredictAllWithCropRes
         cropped_jpeg = service.encode_jpeg(pre.aligned_bgr)
         cropped_b64 = base64.b64encode(cropped_jpeg).decode("utf-8")
     except ValueError as exc:
+        log_prediction_request(
+            endpoint_name="predict_all_with_crop",
+            error_message=str(exc),
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
+        log_prediction_request(
+            endpoint_name="predict_all_with_crop",
+            error_message=str(exc),
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    log_prediction_request(
+        endpoint_name="predict_all_with_crop",
+        gender_prediction=gender_pred,
+        age_agnostic_prediction=age_agnostic_pred,
+        age_gender_specific_prediction=age_gender_specific_pred,
+        race_prediction=race_pred,
+    )
 
     return PredictAllWithCropResponse(
         gender=CombinedGenderResponse(
@@ -162,9 +214,22 @@ def predict_gender_with_crop(file: UploadFile = File(...)) -> GenderWithCropResp
         cropped_jpeg = service.encode_jpeg(pre.aligned_bgr)
         cropped_b64 = base64.b64encode(cropped_jpeg).decode("utf-8")
     except ValueError as exc:
+        log_prediction_request(
+            endpoint_name="predict_gender_with_crop",
+            error_message=str(exc),
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
+        log_prediction_request(
+            endpoint_name="predict_gender_with_crop",
+            error_message=str(exc),
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    log_prediction_request(
+        endpoint_name="predict_gender_with_crop",
+        gender_prediction=pred,
+    )
 
     return GenderWithCropResponse(
         gender=pred.gender,
@@ -175,8 +240,12 @@ def predict_gender_with_crop(file: UploadFile = File(...)) -> GenderWithCropResp
     )
 
 
-@router.post("/predict/age-agnostic-with-crop", response_model=AgeAgnosticWithCropResponse)
-def predict_age_agnostic_with_crop(file: UploadFile = File(...)) -> AgeAgnosticWithCropResponse:
+@router.post(
+    "/predict/age-agnostic-with-crop", response_model=AgeAgnosticWithCropResponse
+)
+def predict_age_agnostic_with_crop(
+    file: UploadFile = File(...),
+) -> AgeAgnosticWithCropResponse:
     """Predict age with gender-agnostic model and include cropped/aligned face image."""
     service = get_inference_service()
     try:
@@ -187,9 +256,22 @@ def predict_age_agnostic_with_crop(file: UploadFile = File(...)) -> AgeAgnosticW
         cropped_jpeg = service.encode_jpeg(pre.aligned_bgr)
         cropped_b64 = base64.b64encode(cropped_jpeg).decode("utf-8")
     except ValueError as exc:
+        log_prediction_request(
+            endpoint_name="predict_age_agnostic_with_crop",
+            error_message=str(exc),
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
+        log_prediction_request(
+            endpoint_name="predict_age_agnostic_with_crop",
+            error_message=str(exc),
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    log_prediction_request(
+        endpoint_name="predict_age_agnostic_with_crop",
+        age_agnostic_prediction=pred,
+    )
 
     return AgeAgnosticWithCropResponse(
         predicted_age=pred.predicted_age,
@@ -220,9 +302,23 @@ def predict_age_gender_specific_with_crop(
         cropped_jpeg = service.encode_jpeg(pre.aligned_bgr)
         cropped_b64 = base64.b64encode(cropped_jpeg).decode("utf-8")
     except ValueError as exc:
+        log_prediction_request(
+            endpoint_name="predict_age_gender_specific_with_crop",
+            error_message=str(exc),
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
+        log_prediction_request(
+            endpoint_name="predict_age_gender_specific_with_crop",
+            error_message=str(exc),
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    log_prediction_request(
+        endpoint_name="predict_age_gender_specific_with_crop",
+        gender_prediction=gender_pred,
+        age_gender_specific_prediction=age_pred,
+    )
 
     return GenderSpecificAgeWithCropResponse(
         gender=gender_pred.gender,
@@ -246,9 +342,22 @@ def predict_race_with_crop(file: UploadFile = File(...)) -> RaceWithCropResponse
         cropped_jpeg = service.encode_jpeg(pre.aligned_bgr)
         cropped_b64 = base64.b64encode(cropped_jpeg).decode("utf-8")
     except ValueError as exc:
+        log_prediction_request(
+            endpoint_name="predict_race_with_crop",
+            error_message=str(exc),
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
+        log_prediction_request(
+            endpoint_name="predict_race_with_crop",
+            error_message=str(exc),
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    log_prediction_request(
+        endpoint_name="predict_race_with_crop",
+        race_prediction=pred,
+    )
 
     return RaceWithCropResponse(
         race=pred.race,
